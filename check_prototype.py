@@ -117,6 +117,9 @@ def isolated(binary):
             # Host gets rp_filter=2 per interface from systemd-sysctl via udev; a fresh netns
             # keeps the strict default and drops TUN replies. Mirror the host.
             run('sysctl', '-q', 'net.ipv4.conf.all.rp_filter=2', 'net.ipv4.conf.default.rp_filter=2')
+            # No IPv6 duplicate address detection: addresses are usable immediately, no timing races.
+            for prefix in ([], ['nsenter', '-t', str(internet.pid), '-n']):
+                run(*prefix, 'sysctl', '-q', 'net.ipv6.conf.all.accept_dad=0', 'net.ipv6.conf.default.accept_dad=0')
             run('ip', 'link', 'set', 'lo', 'up')
             run('ip', 'link', 'add', 'wan0', 'type', 'veth', 'peer', 'name', 'peer0')
             run('ip', 'link', 'set', 'peer0', 'netns', str(internet.pid))
@@ -134,7 +137,7 @@ def isolated(binary):
                 run(*remote, 'addr', 'add', address, 'dev', 'lo')
             run('ip', 'route', 'add', 'default', 'via', '198.18.0.2')
             run('ip', '-6', 'route', 'add', 'default', 'via', '2001:db8:1::2')
-            time.sleep(1.2)  # IPv6 duplicate address detection.
+            time.sleep(.3)
             server = subprocess.Popen(['nsenter', '-t', str(internet.pid), '-n', sys.executable, '-c', SERVER],
                                       stdout=logs, stderr=logs)
             children.append(server)
@@ -190,8 +193,7 @@ def isolated(binary):
                     assert request(direct, address, protocol).returncode == 0
                     assert request(sys.executable, address, protocol).returncode != 0
             assert request(sys.executable, '10.25.0.2', 'tcp').returncode == 0
-            assert request(sys.executable, '203.0.113.2', 'dns').stdout.strip() == '203.0.113.53'
-            print('PASS: proxy stopped → exceptions, LAN and DNS work; other TCP/UDP fails', flush=True)
+            print('PASS: proxy stopped → exceptions and LAN work; other TCP/UDP fails', flush=True)
             router.terminate()
             router.wait(timeout=5)
             for address in ['203.0.113.2', '2001:db8:2::2']:

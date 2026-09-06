@@ -133,17 +133,15 @@ def config(paths, port=2080, core='/opt/Throne/ThroneCore', dns='1.1.1.1'):
         rules.append({'process_path': paths, 'outbound': 'direct'})
     return {
         'log': {'level': 'info'},
-        # Hijacked plain DNS goes direct so exceptions keep resolving while the VPN is down;
-        # systemd-resolved's DNS-over-TLS is not hijacked and still travels through the VPN.
-        'dns': {'servers': [{'type': 'udp', 'tag': 'dns', 'server': dns, 'detour': 'direct'}]},
+        # Hijacked plain DNS goes through the VPN: direct 1.1.1.1:53 is censored on this network.
+        # While the VPN is down, exceptions only reach hosts they have already resolved.
+        'dns': {'servers': [{'type': 'udp', 'tag': 'dns', 'server': dns, 'detour': 'throne'}]},
         'inbounds': [{'type': 'tun', 'tag': 'apps', 'interface_name': 'orouter0',
                       'address': ['172.31.255.1/30', 'fd4f:6d61:7263::1/126'],
                       'auto_route': True, 'auto_redirect': True,
                       'auto_redirect_output_mark': MARK,
                       'strict_route': True, 'stack': 'mixed'}],
-        # udp_fragment is the kernel default anyway; it makes the outbound non-empty, which
-        # sing-box requires for a DNS detour (routing_mark would conflict with auto_redirect).
-        'outbounds': [{'type': 'direct', 'tag': 'direct', 'udp_fragment': True},
+        'outbounds': [{'type': 'direct', 'tag': 'direct'},
                       {'type': 'socks', 'tag': 'throne', 'server': '127.0.0.1',
                        'server_port': port, 'version': '5'}],
         'route': {'auto_detect_interface': True,
