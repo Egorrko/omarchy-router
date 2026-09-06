@@ -224,11 +224,15 @@ def install():
     for path, text in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-    with tempfile.NamedTemporaryFile('w', delete=False) as f:
+    # Same filesystem for os.replace; a dot in the name keeps sudo from reading the draft.
+    with tempfile.NamedTemporaryFile('w', dir='/etc/sudoers.d', prefix='.draft.', delete=False) as f:
         f.write(SUDOERS.format(user=user))
-    run('visudo', '-c', '-q', '-f', f.name)
-    os.chmod(f.name, 0o440)
-    os.replace(f.name, '/etc/sudoers.d/omarchy-router')
+    try:
+        run('visudo', '-c', '-q', '-f', f.name)
+        os.chmod(f.name, 0o440)
+        os.replace(f.name, '/etc/sudoers.d/omarchy-router')
+    finally:
+        Path(f.name).unlink(missing_ok=True)
     BIN.unlink(missing_ok=True)
     BIN.symlink_to(HERE)
     run('systemctl', 'daemon-reload')
@@ -257,5 +261,6 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, RuntimeError) as error:
-        subprocess.run(['notify-send', '-u', 'critical', 'VPN', str(error)])
+        if os.geteuid():  # the menu runs without a terminal; root runs in one
+            subprocess.run(['notify-send', '-u', 'critical', 'VPN', str(error)], stderr=subprocess.DEVNULL)
         raise SystemExit(str(error))
