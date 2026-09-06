@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run with python check_prototype.py /absolute/path/to/sing-box (1.13.16).
+"""Run with python check_prototype.py /absolute/path/to/sing-box (1.13.x); after install: /usr/bin/sing-box.
 
 All network and firewall changes happen in a disposable user/network namespace.
 Uses real TCP/UDP connections, TUN and two distinct executable paths.
@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 
-from router_prototype import MARK, config, load, save, validate
+from omarchy_router import GUARD_NFT, MARK, config, load, save, validate
 
 HERE = Path(__file__).resolve()
 
@@ -47,14 +47,26 @@ def serve(family, kind, address):
 for f, tcp, udp in [(socket.AF_INET, '0.0.0.0', '203.0.113.2'), (socket.AF_INET6, '::', '2001:db8:2::2')]:
     threading.Thread(target=serve, args=(f, socket.SOCK_STREAM, tcp), daemon=True).start()
     threading.Thread(target=serve, args=(f, socket.SOCK_DGRAM, udp), daemon=True).start()
+def dns():  # answers any single-question query with A 203.0.113.53
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(('203.0.113.2', 53))
+    while True:
+        q, peer = s.recvfrom(512)
+        s.sendto(q[:2] + b'\\x81\\x80\\x00\\x01\\x00\\x01\\x00\\x00\\x00\\x00' + q[12:]
+                 + b'\\xc0\\x0c\\x00\\x01\\x00\\x01\\x00\\x00\\x00\\x3c\\x00\\x04' + socket.inet_aton('203.0.113.53'), peer)
+threading.Thread(target=dns, daemon=True).start()
 time.sleep(300)
 '''
 
 CLIENT = '''
 import socket, sys
 s=socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET,
-                socket.SOCK_DGRAM if sys.argv[2]=='udp' else socket.SOCK_STREAM)
+                socket.SOCK_DGRAM if sys.argv[2] in ('udp', 'dns') else socket.SOCK_STREAM)
 s.settimeout(1.5)
+if sys.argv[2]=='dns':  # A? "x." to a public address: hijacked by the router's DNS
+    s.connect((sys.argv[1],53))
+    s.send(b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x01x\\x00\\x00\\x01\\x00\\x01')
+    print(socket.inet_ntoa(s.recv(512)[-4:])); sys.exit()
 s.connect((sys.argv[1],18080))
 if sys.argv[2]=='udp': s.send(b'ping')
 print(s.recv(100).decode())
@@ -146,7 +158,7 @@ def isolated(binary):
                                'routing_mark': MARK}],
             }, 'proxy')
             wait_port(2080, proxy)
-            document = config([direct], core=proxy_binary)
+            document = config([direct], core=proxy_binary, dns='203.0.113.2')
             document['log']['level'] = 'debug'
             router = start(binary, document, 'router')
             for _ in range(80):
@@ -156,17 +168,7 @@ def isolated(binary):
                     raise RuntimeError('TUN router exited')
                 time.sleep(.05)
             time.sleep(.3)
-            # Prototype firewall: only test-network LAN, loopback, TUN and core-marked egress.
-            # Production needs DHCP/NDP policy and boot ordering; do not install this on host.
-            run('nft', '-f', '-', input=f'''table inet prototype {{
-                chain egress {{ type filter hook postrouting priority filter; policy drop;
-                    oifname "lo" accept
-                    oifname "orouter0" accept
-                    meta mark {MARK} accept
-                    ip daddr 10.25.0.0/24 accept
-                    icmpv6 type {{ nd-neighbor-solicit, nd-neighbor-advert }} accept
-                }}
-            }}''')
+            run('nft', '-f', '-', input=GUARD_NFT)  # the production guard; 10.25.0.0/24 is LAN here
 
             def request(executable, address, protocol):
                 return subprocess.run([executable, '-c', CLIENT, address, protocol],
@@ -178,7 +180,9 @@ def isolated(binary):
                     for executable, ending in [(direct, '1'), (sys.executable, '3')]:
                         result = request(executable, address, protocol)
                         assert result.returncode == 0 and result.stdout.strip() == suffix + ending, (address, protocol, ending, result.stderr, result.stdout)
-            print('PASS: exact executable bypass, default SOCKS, TCP + UDP, IPv4 + IPv6', flush=True)
+            result = request(sys.executable, '203.0.113.2', 'dns')
+            assert result.stdout.strip() == '203.0.113.53', (result.stderr, result.stdout)
+            print('PASS: exact executable bypass, default SOCKS, TCP + UDP, IPv4 + IPv6, hijacked DNS', flush=True)
             proxy.terminate()
             proxy.wait(timeout=5)
             for address in ['203.0.113.2', '2001:db8:2::2']:
@@ -186,19 +190,20 @@ def isolated(binary):
                     assert request(direct, address, protocol).returncode == 0
                     assert request(sys.executable, address, protocol).returncode != 0
             assert request(sys.executable, '10.25.0.2', 'tcp').returncode == 0
-            print('PASS: proxy stopped → exceptions and LAN work; other TCP/UDP fails', flush=True)
+            assert request(sys.executable, '203.0.113.2', 'dns').stdout.strip() == '203.0.113.53'
+            print('PASS: proxy stopped → exceptions, LAN and DNS work; other TCP/UDP fails', flush=True)
             router.terminate()
             router.wait(timeout=5)
             for address in ['203.0.113.2', '2001:db8:2::2']:
                 assert request(direct, address, 'tcp').returncode != 0
             assert request(sys.executable, '10.25.0.2', 'tcp').returncode == 0
-            run('nft', 'delete', 'table', 'inet', 'prototype')
+            run('nft', 'delete', 'table', 'inet', 'omarchy-router')
             assert request(sys.executable, '203.0.113.2', 'tcp').returncode == 0
-            print('PASS: router stopped → firewall blocks internet; emergency removal restores direct', flush=True)
+            print('PASS: router stopped → guard blocks internet; emergency removal restores direct', flush=True)
         except BaseException:
-            for args in [('ip', 'rule'), ('ip', 'route', 'show', 'table', 'all'), ('ip', '-s', 'link', 'show', 'orouter0')]:
-                print(run(*args).stdout, file=sys.stderr)
-            print(run('nft', 'list', 'ruleset').stdout, file=sys.stderr)
+            for args in [('ip', 'rule'), ('ip', 'route', 'show', 'table', 'all'),
+                         ('ip', '-s', 'link', 'show', 'orouter0'), ('nft', 'list', 'ruleset')]:
+                print(subprocess.run(args, text=True, capture_output=True).stdout, file=sys.stderr)
             logs.flush()
             logs.seek(0)
             print(logs.read()[-16000:], file=sys.stderr)
