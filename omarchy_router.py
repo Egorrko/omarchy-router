@@ -122,6 +122,11 @@ def processes():
     return sorted(paths, key=lambda p: (Path(p).name.casefold(), p))
 
 
+# Row in the Omarchy menu (Setup → Network); the shell hot-reloads the file.
+MENU_ENTRY = ('"setup.network.vpn": {"icon":"\U000f0582","label":"VPN exceptions",'
+              f'"action":"{BIN} menu","checked":"systemctl is-active -q {GUARD}"}},')
+
+
 def config(paths, port=2080, core='/opt/Throne/ThroneCore', dns='1.1.1.1'):
     paths = validate(paths)
     if not 1 <= port <= 65535:
@@ -215,7 +220,8 @@ def install():
         raise RuntimeError('В Throne включён режим TUN. Выключи его, оставив только локальный прокси '
                            '127.0.0.1:2080, и повтори установку.')
     run('pacman', '-S', '--needed', '--noconfirm', 'sing-box')
-    state = Path(pwd.getpwnam(user).pw_dir) / '.config' / 'omarchy-router' / 'exceptions.json'
+    home = Path(pwd.getpwnam(user).pw_dir)
+    state = home / '.config' / 'omarchy-router' / 'exceptions.json'
     files = {Path('/etc/omarchy-router/guard.nft'): GUARD_NFT,
              Path('/etc/systemd/system') / GUARD: GUARD_UNIT,
              Path('/etc/systemd/system') / ROUTER: ROUTER_UNIT.format(state=state)}
@@ -233,6 +239,12 @@ def install():
         Path(f.name).unlink(missing_ok=True)
     BIN.unlink(missing_ok=True)
     BIN.symlink_to(HERE)
+    menu_file = home / '.config' / 'omarchy' / 'extensions' / 'omarchy-menu.jsonc'
+    text = menu_file.read_text() if menu_file.exists() else '{\n}\n'
+    if MENU_ENTRY not in text:  # the stock file already ends with a trailing comma
+        head, _, tail = text.rpartition('}')
+        menu_file.write_text(f'{head}  {MENU_ENTRY}\n}}{tail}')
+        os.chown(menu_file, pwd.getpwnam(user).pw_uid, pwd.getpwnam(user).pw_gid)
     run('systemctl', 'daemon-reload')
     run('systemctl', 'enable', '--now', GUARD, ROUTER)
     print(f'Готово: защита включена, меню — `{BIN.name} menu`, аварийно — `{BIN.name} off`.')

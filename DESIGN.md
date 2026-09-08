@@ -19,7 +19,7 @@
 Компоненты, всё в `omarchy_router.py`:
 - `menu` — окно Omarchy: добавить/удалить исключение, «Сохранить и применить» (перезапуск сервиса через sudo без пароля), включить/отключить защиту с подтверждением. Горячая клавиша SUPER+SHIFT+V в `~/.config/hypr/bindings.lua`.
 - `off` — аварийная команда: подтверждение и остановка маршрутизатора и guard.
-- `install` (root) — ставит `sing-box` из extra, юниты `omarchy-router-guard.service` (до network-pre.target) и `omarchy-router.service` (генерирует конфиг из `~/.config/omarchy-router/exceptions.json` при старте), `/etc/omarchy-router/guard.nft`, sudoers, симлинк `/usr/local/bin/omarchy-router`; включает оба сервиса.
+- `install` (root) — ставит `sing-box` из extra, юниты `omarchy-router-guard.service` (до network-pre.target) и `omarchy-router.service` (генерирует конфиг из `~/.config/omarchy-router/exceptions.json` при старте), `/etc/omarchy-router/guard.nft`, sudoers, симлинк `/usr/local/bin/omarchy-router`, пункт «VPN exceptions» в Omarchy-меню (Setup → Network, галочка — guard активен) через `~/.config/omarchy/extensions/omarchy-menu.jsonc`; включает оба сервиса.
 
 Решения:
 - **Режим TUN в Throne должен быть выключен постоянно**: оба sing-box используют одну nft-таблицу `inet sing-box` и одни приоритеты ip rule, поэтому любое включение или выключение TUN в Throne стирает наши правила перехвата, и трафик уходит напрямую до перезапуска `omarchy-router.service`. Установщик отказывается работать при поднятом `throne-tun`. Throne остаётся источником SOCKS на 2080 и средством выбора сервера.
