@@ -1,2 +1,11 @@
 .prototype/
 __pycache__/
+# zapret-rust and what it drops into its cwd
+bin/
+lists/
+logs/
+custom-strategies/
+zapret-discord-youtube-linux/
+conf.env
+autotune_*.txt
+ttl_domains.txt

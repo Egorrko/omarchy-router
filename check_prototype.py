@@ -5,6 +5,7 @@ All network and firewall changes happen in a disposable user/network namespace.
 Uses real TCP/UDP connections, TUN and two distinct executable paths.
 """
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -14,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from omarchy_router import GUARD_NFT, MARK, config, load, save, validate
+from omarchy_router import GUARD_NFT, MARK, app, config, load, save, validate
 
 HERE = Path(__file__).resolve()
 
@@ -95,6 +96,11 @@ def isolated(binary):
             state = tmp / 'exceptions.json'
             save(['/games/dota 2/dota2', '/games/dota 2/dota2'], state)
             assert load(state) == ['/games/dota 2/dota2']
+            proton = '/home/u/Steam/steamapps/common/Proton - Experimental/'
+            assert app(proton + 'files/bin/wineserver') == app(proton + 'files/lib/wine/i386-unix/wine64-preloader') == proton
+            assert app('/usr/lib/wine/x86_64-unix/wine64-preloader') == '/usr/lib/wine/x86_64-unix/wine64-preloader'
+            assert app(proton + 'files/bin/python3') == proton + 'files/bin/python3'
+            assert {'process_path_regex': ['^' + re.escape(proton)], 'outbound': 'direct'} in config([proton])['route']['rules']
             for bad in [['relative'], ['/bad\npath'], 'not a list']:
                 try:
                     validate(bad)

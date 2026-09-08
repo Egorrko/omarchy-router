@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import subprocess
 import tempfile
 
@@ -19,16 +20,20 @@ LAN = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
        '169.254.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10']
 MARK = 21330        # 0x5352: sing-box marks its own sockets; the guard lets them out.
 THRONE_MARK = 8228  # 0x2024: mark Throne's core may put on its sockets.
+ZAPRET_MARK = 0x40000000  # zapret's nfqws marks the fakes and split segments it injects.
+NFQWS_UID = 0x7FFFFFFF    # nfqws drops to this uid; its raw sockets must skip our TUN routing.
 ROUTER = 'omarchy-router.service'
 GUARD = 'omarchy-router-guard.service'
 BIN = Path('/usr/local/bin/omarchy-router')
 
-GUARD_NFT = f'''table inet omarchy-router {{
+GUARD_NFT = f'''destroy table inet omarchy-router
+table inet omarchy-router {{
     chain egress {{
         type filter hook postrouting priority filter; policy drop;
         oifname "lo" accept
         oifname "orouter0" accept
         meta mark {{ {MARK}, {THRONE_MARK} }} accept
+        meta mark & {ZAPRET_MARK} == {ZAPRET_MARK} counter accept
         ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 }} accept
         ip6 daddr {{ fc00::/7, fe80::/10, ff00::/8 }} accept
         udp sport 68 udp dport 67 accept
@@ -108,6 +113,16 @@ def save(paths, state=STATE):
             Path(f.name).unlink(missing_ok=True)
 
 
+WINE = {'wineserver', 'wine-preloader', 'wine64-preloader', 'wine', 'wine64'}
+
+
+def app(path):
+    """Every Wine game is the same wine64-preloader and wineserver, so the exception is the
+    whole Proton/Wine build under $HOME (a prefix ending in '/'), not one executable."""
+    match = re.match(r'(/home/[^/]+/.+?)/(files|bin|lib\d*)/', path)
+    return match[1] + '/' if match and Path(path).name in WINE else path
+
+
 def processes():
     paths = set()
     for proc in Path('/proc').glob('[0-9]*'):
@@ -116,7 +131,7 @@ def processes():
                 continue
             path = os.readlink(proc / 'exe')
             if not path.endswith(' (deleted)'):
-                paths.update(validate([path]))
+                paths.update(validate([app(path)]))
         except (OSError, ValueError):
             continue
     return sorted(paths, key=lambda p: (Path(p).name.casefold(), p))
@@ -134,16 +149,21 @@ def config(paths, port=2080, core='/opt/Throne/ThroneCore', dns='1.1.1.1'):
     rules = [{'port': 53, 'action': 'hijack-dns'},  # DNAT'd by auto_redirect; must precede the LAN rule
              {'process_path': validate([core]), 'outbound': 'direct'},
              {'ip_cidr': LAN, 'outbound': 'direct'}]
-    if paths:
-        rules.append({'process_path': paths, 'outbound': 'direct'})
+    if exact := [p for p in paths if not p.endswith('/')]:
+        rules.append({'process_path': exact, 'outbound': 'direct'})
+    if builds := [p for p in paths if p.endswith('/')]:
+        rules.append({'process_path_regex': ['^' + re.escape(p) for p in builds], 'outbound': 'direct'})
     return {
         'log': {'level': 'info'},
         # Hijacked plain DNS goes through the VPN: direct 1.1.1.1:53 is censored on this network.
         # While the VPN is down, exceptions only reach hosts they have already resolved.
-        'dns': {'servers': [{'type': 'udp', 'tag': 'dns', 'server': dns, 'detour': 'throne'}]},
+        # ipv4_only: this host has no direct IPv6, and Wine games take the VPN's AAAA answer
+        # and never fall back to A; the empty AAAA reply makes them use IPv4.
+        'dns': {'servers': [{'type': 'udp', 'tag': 'dns', 'server': dns, 'detour': 'throne'}],
+                'strategy': 'ipv4_only'},
         'inbounds': [{'type': 'tun', 'tag': 'apps', 'interface_name': 'orouter0',
                       'address': ['172.31.255.1/30', 'fd4f:6d61:7263::1/126'],
-                      'auto_route': True, 'auto_redirect': True,
+                      'auto_route': True, 'auto_redirect': True, 'exclude_uid': [NFQWS_UID],
                       'auto_redirect_output_mark': MARK,
                       'strict_route': True, 'stack': 'mixed'}],
         'outbounds': [{'type': 'direct', 'tag': 'direct'},
@@ -246,7 +266,10 @@ def install():
         menu_file.write_text(f'{head}  {MENU_ENTRY}\n}}{tail}')
         os.chown(menu_file, pwd.getpwnam(user).pw_uid, pwd.getpwnam(user).pw_gid)
     run('systemctl', 'daemon-reload')
-    run('systemctl', 'enable', '--now', GUARD, ROUTER)
+    run('systemctl', 'enable', GUARD, ROUTER)
+    run('systemctl', 'start', GUARD)
+    run('nft', '-f', '/etc/omarchy-router/guard.nft')  # atomic reload when the guard was already up
+    run('systemctl', 'restart', ROUTER)
     print(f'Готово: защита включена, меню — `{BIN.name} menu`, аварийно — `{BIN.name} off`.')
 
 
