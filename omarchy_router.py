@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Per-app VPN bypass for Throne on Omarchy.
+"""Per-app VPN bypass for Happ on Omarchy.
 
-Own sing-box TUN sends chosen executables direct and everything else into Throne's
-local SOCKS. An nftables guard drops any other internet egress, also while Throne
+Own sing-box TUN sends chosen executables direct and everything else into Happ's
+local SOCKS. An nftables guard drops any other internet egress, also while Happ
 is closed or the VPN is down. `sudo omarchy_router.py install` sets it all up.
 """
 import argparse
@@ -19,7 +19,6 @@ STATE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'om
 LAN = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
        '169.254.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10']
 MARK = 21330        # 0x5352: sing-box marks its own sockets; the guard lets them out.
-THRONE_MARK = 8228  # 0x2024: mark Throne's core may put on its sockets.
 ZAPRET_MARK = 0x40000000  # zapret's nfqws marks the fakes and split segments it injects.
 NFQWS_UID = 0x7FFFFFFF    # nfqws drops to this uid; its raw sockets must skip our TUN routing.
 ROUTER = 'omarchy-router.service'
@@ -32,7 +31,7 @@ table inet omarchy-router {{
         type filter hook postrouting priority filter; policy drop;
         oifname "lo" accept
         oifname "orouter0" accept
-        meta mark {{ {MARK}, {THRONE_MARK} }} accept
+        meta mark {MARK} accept
         meta mark & {ZAPRET_MARK} == {ZAPRET_MARK} counter accept
         ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 }} accept
         ip6 daddr {{ fc00::/7, fe80::/10, ff00::/8 }} accept
@@ -58,7 +57,7 @@ WantedBy=multi-user.target
 '''
 
 ROUTER_UNIT = f'''[Unit]
-Description=Omarchy router: per-app VPN bypass in front of Throne
+Description=Omarchy router: per-app VPN bypass in front of Happ
 Wants=network-online.target {GUARD}
 After=network-online.target {GUARD}
 
@@ -142,12 +141,14 @@ MENU_ENTRY = ('"setup.network.vpn": {"icon":"\U000f0582","label":"VPN exceptions
               f'"action":"{BIN} menu","checked":"systemctl is-active -q {GUARD}"}},')
 
 
-def config(paths, port=2080, core='/opt/Throne/ThroneCore', dns='1.1.1.1'):
+def config(paths, port=10808, core='/opt/happ/bin/core/xray', dns='1.1.1.1', dns_type='https',
+           core_dns='77.88.8.8'):
     paths = validate(paths)
+    core = validate([core])
     if not 1 <= port <= 65535:
         raise ValueError('Недопустимый порт SOCKS')
     rules = [{'port': 53, 'action': 'hijack-dns'},  # DNAT'd by auto_redirect; must precede the LAN rule
-             {'process_path': validate([core]), 'outbound': 'direct'},
+             {'process_path': core, 'outbound': 'direct'},
              {'ip_cidr': LAN, 'outbound': 'direct'}]
     if exact := [p for p in paths if not p.endswith('/')]:
         rules.append({'process_path': exact, 'outbound': 'direct'})
@@ -157,9 +158,15 @@ def config(paths, port=2080, core='/opt/Throne/ThroneCore', dns='1.1.1.1'):
         'log': {'level': 'info'},
         # Hijacked plain DNS goes through the VPN: direct 1.1.1.1:53 is censored on this network.
         # While the VPN is down, exceptions only reach hosts they have already resolved.
+        # https, not udp/tcp: Throne hijacked port 53 itself and dropped the session after 10 s idle,
+        # so the next query hit a dead relay and timed out (~6% of lookups). DoH is never hijacked.
         # ipv4_only: this host has no direct IPv6, and Wine games take the VPN's AAAA answer
         # and never fall back to A; the empty AAAA reply makes them use IPv4.
-        'dns': {'servers': [{'type': 'udp', 'tag': 'dns', 'server': dns, 'detour': 'throne'}],
+        # The core's own lookups (the VPN server's name) must not ride the VPN it is bringing up:
+        # hijack-dns catches them first, and with Happ's TUN off they looped back into xray (2026-09-23).
+        'dns': {'servers': [{'type': dns_type, 'tag': 'dns', 'server': dns, 'detour': 'vpn'},
+                            {'type': 'udp', 'tag': 'core-dns', 'server': core_dns}],
+                'rules': [{'process_path': core, 'server': 'core-dns'}],
                 'strategy': 'ipv4_only'},
         'inbounds': [{'type': 'tun', 'tag': 'apps', 'interface_name': 'orouter0',
                       'address': ['172.31.255.1/30', 'fd4f:6d61:7263::1/126'],
@@ -167,10 +174,10 @@ def config(paths, port=2080, core='/opt/Throne/ThroneCore', dns='1.1.1.1'):
                       'auto_redirect_output_mark': MARK,
                       'strict_route': True, 'stack': 'mixed'}],
         'outbounds': [{'type': 'direct', 'tag': 'direct'},
-                      {'type': 'socks', 'tag': 'throne', 'server': '127.0.0.1',
+                      {'type': 'socks', 'tag': 'vpn', 'server': '127.0.0.1',
                        'server_port': port, 'version': '5'}],
-        'route': {'auto_detect_interface': True,
-                  'rules': rules, 'final': 'throne'},
+        'route': {'auto_detect_interface': True, 'default_domain_resolver': 'core-dns',
+                  'rules': rules, 'final': 'vpn'},
     }
 
 
@@ -236,9 +243,9 @@ def install():
     user = os.environ.get('SUDO_USER')
     if os.geteuid() or not user:
         raise RuntimeError('Запускать так: sudo ./omarchy_router.py install')
-    if subprocess.run(['ip', 'link', 'show', 'throne-tun'], capture_output=True).returncode == 0:
-        raise RuntimeError('В Throne включён режим TUN. Выключи его, оставив только локальный прокси '
-                           '127.0.0.1:2080, и повтори установку.')
+    if subprocess.run(['ip', 'link', 'show', 'happ-xray'], capture_output=True).returncode == 0:
+        raise RuntimeError('В Happ включён режим TUN. Выключи его (Advanced settings → TUN), оставив '
+                           'только локальный прокси 127.0.0.1:10808, и повтори установку.')
     run('pacman', '-S', '--needed', '--noconfirm', 'sing-box')
     home = Path(pwd.getpwnam(user).pw_dir)
     state = home / '.config' / 'omarchy-router' / 'exceptions.json'
@@ -277,7 +284,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['menu', 'off', 'list', 'export', 'install'])
     parser.add_argument('--state', type=Path, default=STATE)
-    parser.add_argument('--port', type=int, default=2080)
+    parser.add_argument('--port', type=int, default=10808)
     args = parser.parse_args()
     if args.command == 'menu':
         menu(args.state)

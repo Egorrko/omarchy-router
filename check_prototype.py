@@ -110,6 +110,8 @@ def isolated(binary):
                     raise AssertionError('Invalid state accepted')
             direct = str(tmp / 'direct-python')
             shutil.copy2(sys.executable, direct)
+            core = str(tmp / 'core-python')  # stands in for xray: only its DNS is special
+            shutil.copy2(sys.executable, core)
             proxy_binary = str(tmp / 'throne-fixture')
             shutil.copy2(binary, proxy_binary)
             # Holds the "internet" namespace. The server starts only after addresses exist:
@@ -161,14 +163,15 @@ def isolated(binary):
                 return process
 
             proxy = start(proxy_binary, {
-                'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': 2080}],
+                'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': 10808}],
                 'outbounds': [{'type': 'direct', 'inet4_bind_address': '198.18.0.3',
                                'inet6_bind_address': '2001:db8:1::3', 'bind_interface': 'wan0',
                                'routing_mark': MARK}],
             }, 'proxy')
-            wait_port(2080, proxy)
-            document = config([direct], core=proxy_binary, dns='203.0.113.2')
+            wait_port(10808, proxy)
+            document = config([direct], core=core, dns='203.0.113.2', dns_type='udp', core_dns='203.0.113.2')  # the fake upstream speaks plain UDP
             document['log']['level'] = 'debug'
+            document['dns']['disable_cache'] = True  # a cached answer would hide which server replied
             router = start(binary, document, 'router')
             for _ in range(80):
                 if subprocess.run(['ip', 'link', 'show', 'orouter0'], capture_output=True).returncode == 0:
@@ -199,7 +202,10 @@ def isolated(binary):
                     assert request(direct, address, protocol).returncode == 0
                     assert request(sys.executable, address, protocol).returncode != 0
             assert request(sys.executable, '10.25.0.2', 'tcp').returncode == 0
-            print('PASS: proxy stopped → exceptions and LAN work; other TCP/UDP fails', flush=True)
+            assert request(sys.executable, '203.0.113.2', 'dns').returncode != 0
+            # The core resolves its server while the VPN is down; through the VPN it would deadlock.
+            assert request(core, '203.0.113.2', 'dns').stdout.strip() == '203.0.113.53'
+            print('PASS: proxy stopped → exceptions, LAN and core DNS work; other TCP/UDP/DNS fails', flush=True)
             router.terminate()
             router.wait(timeout=5)
             for address in ['203.0.113.2', '2001:db8:2::2']:
