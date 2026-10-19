@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from omarchy_router import GUARD_NFT, MARK, app, config, load, save, validate
+from omarchy_router import GUARD_NFT, MARK, app, config, load, rule_set, rules_path, save, validate
 
 HERE = Path(__file__).resolve()
 
@@ -100,7 +100,15 @@ def isolated(binary):
             assert app(proton + 'files/bin/wineserver') == app(proton + 'files/lib/wine/i386-unix/wine64-preloader') == proton
             assert app('/usr/lib/wine/x86_64-unix/wine64-preloader') == '/usr/lib/wine/x86_64-unix/wine64-preloader'
             assert app(proton + 'files/bin/python3') == proton + 'files/bin/python3'
-            assert {'process_path_regex': ['^' + re.escape(proton)], 'outbound': 'direct'} in config([proton])['route']['rules']
+            assert rule_set([proton])['rules'] == [{'process_path_regex': ['^' + re.escape(proton)]}]
+            appimage = app('/tmp/.mount_FreakRhuAyTI/FreakRating')
+            assert appimage == app('/tmp/.mount_FreakRxQ9zLp/FreakRating') == '/tmp/.mount_FreakR*/FreakRating'
+            assert re.match(rule_set([appimage])['rules'][0]['process_path_regex'][0], '/tmp/.mount_FreakRabcdef/FreakRating')
+            assert not re.match(rule_set([appimage])['rules'][0]['process_path_regex'][0], '/tmp/.mount_FreakRabcdef/FreakRating2')
+            assert rule_set([])['rules'] == []
+            discord = app('/home/u/.config/discord/app-1.0.160/Discord')
+            assert discord == app('/home/u/.config/discord/app-1.0.157/Discord') == '/home/u/.config/discord/app-*/Discord'
+            assert re.match(rule_set([discord])['rules'][0]['process_path_regex'][0], '/home/u/.config/discord/app-1.0.161/Discord')
             for bad in [['relative'], ['/bad\npath'], 'not a list']:
                 try:
                     validate(bad)
@@ -169,7 +177,8 @@ def isolated(binary):
                                'routing_mark': MARK}],
             }, 'proxy')
             wait_port(10808, proxy)
-            document = config([direct], core=core, dns='203.0.113.2', dns_type='udp', core_dns='203.0.113.2')  # the fake upstream speaks plain UDP
+            save([], state)  # the exception is added below while running: no restart
+            document = config(rules_path(state), core=core, dns='203.0.113.2', dns_type='udp', core_dns='203.0.113.2')  # the fake upstream speaks plain UDP
             document['log']['level'] = 'debug'
             document['dns']['disable_cache'] = True  # a cached answer would hide which server replied
             router = start(binary, document, 'router')
@@ -187,6 +196,17 @@ def isolated(binary):
                                       capture_output=True, text=True, timeout=4,
                                       env=dict(os.environ, PYTHONHOME=sys.base_prefix))
 
+            result = request(direct, '203.0.113.2', 'tcp')
+            assert result.stdout.strip() == '198.18.0.3', ('not an exception yet', result.stderr, result.stdout)
+            save([direct], state)
+            for _ in range(50):  # sing-box watches the rule-set file
+                if request(direct, '203.0.113.2', 'tcp').stdout.strip() == '198.18.0.1':
+                    break
+                time.sleep(.1)
+            else:
+                raise AssertionError('rules.json was not reloaded')
+            assert router.poll() is None
+            print('PASS: saved exception applies to the running router without a restart', flush=True)
             for address, suffix in [('203.0.113.2', '198.18.0.'), ('2001:db8:2::2', '2001:db8:1::')]:
                 for protocol in ['tcp', 'udp']:
                     for executable, ending in [(direct, '1'), (sys.executable, '3')]:
